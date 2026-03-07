@@ -10,7 +10,10 @@ import {
   completeAnthropicText,
   normalizeAnthropicModelAccessError,
 } from "./providers/anthropic.js";
-import { completeGoogleDocument, completeGoogleText } from "./providers/google.js";
+import {
+  completeGoogleDocument,
+  completeGoogleText,
+} from "./providers/google.js";
 import {
   resolveAnthropicModel,
   resolveGoogleModel,
@@ -151,6 +154,27 @@ function resolveEffectiveTemperature({
   return temperature;
 }
 
+function resolveGoogleEmptyResponseFallbackModelId(modelId: string): string | null {
+  const normalized = modelId.trim().toLowerCase();
+  if (!normalized.startsWith("google/")) return null;
+  const raw = normalized.slice("google/".length);
+  if (!raw.includes("preview") && !raw.includes("exp")) return null;
+  if (raw === "gemini-2.5-flash") return null;
+  return "google/gemini-2.5-flash";
+}
+
+function isGoogleEmptySummaryError(error: unknown): boolean {
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : typeof (error as { message?: unknown })?.message === "string"
+          ? String((error as { message?: unknown }).message)
+          : "";
+  return /empty summary/i.test(message);
+}
+
 export async function generateTextWithModelId({
   modelId,
   apiKeys,
@@ -264,23 +288,48 @@ export async function generateTextWithModelId({
         throw new Error(
           "Missing GEMINI_API_KEY (or GOOGLE_GENERATIVE_AI_API_KEY / GOOGLE_API_KEY) for google/... model",
         );
-      const result = await completeGoogleDocument({
-        modelId: parsed.model,
-        apiKey,
-        promptText: prompt.userText,
-        document: documentAttachment,
-        maxOutputTokens,
-        temperature: effectiveTemperature,
-        timeoutMs,
-        fetchImpl,
-        googleBaseUrlOverride,
-      });
-      return {
-        text: result.text,
-        canonicalModelId: parsed.canonical,
-        provider: parsed.provider,
-        usage: result.usage,
-      };
+      try {
+        const result = await completeGoogleDocument({
+          modelId: parsed.model,
+          apiKey,
+          promptText: prompt.userText,
+          document: documentAttachment,
+          maxOutputTokens,
+          temperature: effectiveTemperature,
+          timeoutMs,
+          fetchImpl,
+          googleBaseUrlOverride,
+        });
+        return {
+          text: result.text,
+          canonicalModelId: parsed.canonical,
+          provider: parsed.provider,
+          usage: result.usage,
+        };
+      } catch (error) {
+        const fallbackModelId =
+          isGoogleEmptySummaryError(error) &&
+          resolveGoogleEmptyResponseFallbackModelId(parsed.canonical);
+        if (!fallbackModelId) throw error;
+        return generateTextWithModelId({
+          modelId: fallbackModelId,
+          apiKeys,
+          prompt,
+          temperature,
+          maxOutputTokens,
+          timeoutMs,
+          fetchImpl,
+          forceOpenRouter,
+          openaiBaseUrlOverride,
+          anthropicBaseUrlOverride,
+          googleBaseUrlOverride,
+          xaiBaseUrlOverride,
+          zaiBaseUrlOverride,
+          forceChatCompletions,
+          retries,
+          onRetry,
+        });
+      }
     }
 
     throw createUnsupportedFunctionalityError(
@@ -452,6 +501,30 @@ export async function generateTextWithModelId({
         error instanceof DOMException && error.name === "AbortError"
           ? new Error(`LLM request timed out after ${timeoutMs}ms (model ${parsed.canonical}).`)
           : error;
+      const googleFallbackModelId =
+        parsed.provider === "google" &&
+        isGoogleEmptySummaryError(normalizedError) &&
+        resolveGoogleEmptyResponseFallbackModelId(parsed.canonical);
+      if (googleFallbackModelId) {
+        return generateTextWithModelId({
+          modelId: googleFallbackModelId,
+          apiKeys,
+          prompt,
+          temperature,
+          maxOutputTokens,
+          timeoutMs,
+          fetchImpl,
+          forceOpenRouter,
+          openaiBaseUrlOverride,
+          anthropicBaseUrlOverride,
+          googleBaseUrlOverride,
+          xaiBaseUrlOverride,
+          zaiBaseUrlOverride,
+          forceChatCompletions,
+          retries: Math.max(0, maxRetries - attempt),
+          onRetry,
+        });
+      }
       if (parsed.provider === "anthropic") {
         const normalized = normalizeAnthropicModelAccessError(normalizedError, parsed.model);
         if (normalized) throw normalized;

@@ -6,6 +6,58 @@ import { normalizeGoogleUsage, normalizeTokenUsage } from "../usage.js";
 import { resolveGoogleModel } from "./models.js";
 import { bytesToBase64, resolveBaseUrlOverride } from "./shared.js";
 
+type GoogleAssistantLike = {
+  stopReason?: string;
+  errorMessage?: string;
+};
+
+type GoogleContentBlockLike = {
+  type: string;
+  text?: string;
+};
+
+function extractGoogleErrorMessage(value: unknown): string | null {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      const nested = extractGoogleErrorMessage(parsed);
+      if (nested) return nested;
+    } catch {}
+    return trimmed;
+  }
+  if (!value || typeof value !== "object") return null;
+  const record = value as Record<string, unknown>;
+  return (
+    extractGoogleErrorMessage(record.error) ??
+    extractGoogleErrorMessage(record.message) ??
+    extractGoogleErrorMessage(record.details)
+  );
+}
+
+export function normalizeGoogleAssistantError(
+  response: GoogleAssistantLike | null | undefined,
+  modelId: string,
+): Error | null {
+  const raw = typeof response?.errorMessage === "string" ? response.errorMessage : "";
+  if (!raw.trim() && response?.stopReason !== "error") return null;
+  const message =
+    extractGoogleErrorMessage(raw) ?? `Google request failed for model "${modelId}".`;
+  if (/not found|not supported|Call ListModels/i.test(message)) {
+    return new Error(`Google API rejected model "${modelId}": ${message}`);
+  }
+  return new Error(`Google request failed for model "${modelId}": ${message}`);
+}
+
+function extractGoogleResponseText(content: GoogleContentBlockLike[]): string {
+  return content
+    .filter((block) => block.type === "text")
+    .map((block) => block.text ?? "")
+    .join("")
+    .trim();
+}
+
 export async function completeGoogleText({
   modelId,
   apiKey,
@@ -30,11 +82,9 @@ export async function completeGoogleText({
     apiKey,
     signal,
   });
-  const text = result.content
-    .filter((c) => c.type === "text")
-    .map((c) => c.text)
-    .join("")
-    .trim();
+  const normalizedError = normalizeGoogleAssistantError(result, modelId);
+  if (normalizedError) throw normalizedError;
+  const text = extractGoogleResponseText(result.content as GoogleContentBlockLike[]);
   if (!text) throw new Error(`LLM returned an empty summary (model google/${modelId}).`);
   return { text, usage: normalizeTokenUsage(result.usage) };
 }

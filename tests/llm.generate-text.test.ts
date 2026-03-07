@@ -484,6 +484,100 @@ describe("llm generate/stream", () => {
     expect(mocks.completeSimple).toHaveBeenCalledTimes(2);
   });
 
+  it("falls back from empty Google preview responses to google/gemini-2.5-flash", async () => {
+    mocks.completeSimple.mockClear();
+    mocks.completeSimple.mockImplementationOnce(async (model: MockModel) =>
+      makeAssistantMessage({
+        provider: "google",
+        model: model.id,
+        api: "google-generative-ai",
+        text: "   ",
+        usage: { input: 1, output: 2, totalTokens: 3 },
+      }),
+    );
+    mocks.completeSimple.mockImplementationOnce(async (model: MockModel) =>
+      makeAssistantMessage({
+        provider: "google",
+        model: model.id,
+        api: "google-generative-ai",
+        text: "ok",
+        usage: { input: 1, output: 2, totalTokens: 3 },
+      }),
+    );
+
+    const result = await generateTextWithModelId({
+      modelId: "google/gemini-3-flash-preview",
+      apiKeys: {
+        openaiApiKey: null,
+        xaiApiKey: null,
+        googleApiKey: "k",
+        anthropicApiKey: null,
+        openrouterApiKey: null,
+      },
+      prompt: { userText: "hi" },
+      timeoutMs: 2000,
+      fetchImpl: globalThis.fetch.bind(globalThis),
+      maxOutputTokens: 10,
+    });
+
+    expect(result.text).toBe("ok");
+    expect(result.canonicalModelId).toBe("google/gemini-2.5-flash");
+    expect((mocks.completeSimple.mock.calls[0]?.[0] as MockModel).id).toBe("gemini-3-flash-preview");
+    expect((mocks.completeSimple.mock.calls[1]?.[0] as MockModel).id).toBe("gemini-2.5-flash");
+  });
+
+  it("surfaces embedded Google API errors instead of reporting an empty summary", async () => {
+    mocks.completeSimple.mockClear();
+    mocks.completeSimple.mockImplementationOnce(async () => ({
+      role: "assistant",
+      content: [],
+      api: "google-generative-ai",
+      provider: "google",
+      model: "gemini-3-flash",
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "error",
+      timestamp: Date.now(),
+      errorMessage: JSON.stringify({
+        error: {
+          message: JSON.stringify({
+            error: {
+              code: 404,
+              message:
+                "models/gemini-3-flash is not found for API version v1beta, or is not supported for generateContent. Call ListModels to see the list of available models and their supported methods.",
+              status: "NOT_FOUND",
+            },
+          }),
+          code: 404,
+          status: "Not Found",
+        },
+      }),
+    }));
+
+    await expect(
+      generateTextWithModelId({
+        modelId: "google/gemini-3-flash",
+        apiKeys: {
+          openaiApiKey: null,
+          xaiApiKey: null,
+          googleApiKey: "k",
+          anthropicApiKey: null,
+          openrouterApiKey: null,
+        },
+        prompt: { userText: "hi" },
+        timeoutMs: 2000,
+        fetchImpl: globalThis.fetch.bind(globalThis),
+        maxOutputTokens: 10,
+      }),
+    ).rejects.toThrow(/Google API rejected model "gemini-3-flash"/);
+  });
+
   it("enforces missing-key errors per provider", async () => {
     await expect(
       generateTextWithModelId({
