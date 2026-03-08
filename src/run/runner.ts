@@ -1,12 +1,6 @@
 import { execFile } from "node:child_process";
 import { CommanderError } from "commander";
 import { type CacheState } from "../cache.js";
-import {
-  parseExtractFormat,
-  parseMaxExtractCharactersArg,
-  parseMetricsMode,
-  parseStreamMode,
-} from "../flags.js";
 import type { ExecFileFn } from "../markitdown.js";
 import type { FixedModelSpec } from "../model-spec.js";
 import { resolveSlideSettings } from "../slides/index.js";
@@ -36,8 +30,8 @@ import { resolveRunInput } from "./run-input.js";
 import { createRunMetrics } from "./run-metrics.js";
 import { resolveModelSelection } from "./run-models.js";
 import { resolveDesiredOutputTokens } from "./run-output.js";
-import { resolveCliRunSettings } from "./run-settings.js";
 import { resolveStreamSettings } from "./run-stream.js";
+import { resolveRunnerFlags } from "./runner-flags.js";
 import {
   applyWidthOverride,
   handleCacheUtilityFlags,
@@ -171,133 +165,46 @@ export async function runCli(
   const url = inputResolution.url;
 
   const runStartedAtMs = Date.now();
-
-  const videoModeExplicitlySet = normalizedArgv.some(
-    (arg) => arg === "--video-mode" || arg.startsWith("--video-mode="),
-  );
-  const lengthExplicitlySet = normalizedArgv.some(
-    (arg) => arg === "--length" || arg.startsWith("--length="),
-  );
-  const languageExplicitlySet = normalizedArgv.some(
-    (arg) =>
-      arg === "--language" ||
-      arg.startsWith("--language=") ||
-      arg === "--lang" ||
-      arg.startsWith("--lang="),
-  );
-  const noCacheFlag = program.opts().cache === false;
-  const noMediaCacheFlag = program.opts().mediaCache === false;
-  const extractMode = Boolean(program.opts().extract) || Boolean(program.opts().extractOnly);
-  const json = Boolean(program.opts().json);
-  const forceSummary = Boolean(program.opts().forceSummary);
-  const slidesDebug = Boolean(program.opts().slidesDebug);
-  const streamMode = parseStreamMode(program.opts().stream as string);
-  const plain = Boolean(program.opts().plain);
-  const debug = Boolean(program.opts().debug);
-  const verbose = Boolean(program.opts().verbose) || debug;
-
-  const normalizeTranscriber = (
-    value: unknown,
-  ): "auto" | "whisper" | "parakeet" | "canary" | null => {
-    if (typeof value !== "string") return null;
-    const normalized = value.trim().toLowerCase();
-    if (
-      normalized === "auto" ||
-      normalized === "whisper" ||
-      normalized === "parakeet" ||
-      normalized === "canary"
-    )
-      return normalized;
-    return null;
-  };
-
-  const transcriberExplicitlySet = normalizedArgv.some(
-    (arg) => arg === "--transcriber" || arg.startsWith("--transcriber="),
-  );
-  const envTranscriber =
-    (envForRun as Record<string, string | undefined>)?.SUMMARIZE_TRANSCRIBER ??
-    process.env.SUMMARIZE_TRANSCRIBER ??
-    null;
-  const transcriber =
-    normalizeTranscriber(transcriberExplicitlySet ? program.opts().transcriber : envTranscriber) ??
-    "auto";
-  (envForRun as Record<string, string | undefined>).SUMMARIZE_TRANSCRIBER = transcriber;
-
-  const maxExtractCharacters = parseMaxExtractCharactersArg(
-    typeof program.opts().maxExtractCharacters === "string"
-      ? (program.opts().maxExtractCharacters as string)
-      : program.opts().maxExtractCharacters != null
-        ? String(program.opts().maxExtractCharacters)
-        : undefined,
-  );
-
-  const isYoutubeUrl = typeof url === "string" ? /youtube\.com|youtu\.be/i.test(url) : false;
-  const formatExplicitlySet = normalizedArgv.some(
-    (arg) => arg === "--format" || arg.startsWith("--format="),
-  );
-  const rawFormatOpt =
-    typeof program.opts().format === "string" ? (program.opts().format as string) : null;
-  const format = parseExtractFormat(
-    formatExplicitlySet
-      ? (rawFormatOpt ?? "text")
-      : extractMode && inputTarget.kind === "url" && !isYoutubeUrl
-        ? "md"
-        : "text",
-  );
-
-  const runSettings = resolveCliRunSettings({
-    length: String(program.opts().length),
-    firecrawl: String(program.opts().firecrawl),
-    markdownMode:
-      typeof program.opts().markdownMode === "string" ? program.opts().markdownMode : undefined,
-    markdown: typeof program.opts().markdown === "string" ? program.opts().markdown : undefined,
-    format,
-    preprocess: String(program.opts().preprocess),
-    youtube: String(program.opts().youtube),
-    timeout: String(program.opts().timeout),
-    retries: String(program.opts().retries),
-    maxOutputTokens:
-      typeof program.opts().maxOutputTokens === "string"
-        ? program.opts().maxOutputTokens
-        : program.opts().maxOutputTokens != null
-          ? String(program.opts().maxOutputTokens)
-          : undefined,
-  });
   const {
+    videoModeExplicitlySet,
+    lengthExplicitlySet,
+    languageExplicitlySet,
+    noCacheFlag,
+    noMediaCacheFlag,
+    extractMode,
+    json,
+    forceSummary,
+    slidesDebug,
+    streamMode,
+    plain,
+    debug,
+    verbose,
+    transcriber,
+    maxExtractCharacters,
+    isYoutubeUrl,
+    format,
     youtubeMode,
     lengthArg,
     maxOutputTokensArg,
     timeoutMs,
     retries,
     preprocessMode,
-    firecrawlMode: requestedFirecrawlMode,
+    requestedFirecrawlMode,
     markdownMode,
-  } = runSettings;
+    metricsEnabled,
+    metricsDetailed,
+    shouldComputeReport,
+    markdownModeExplicitlySet,
+  } = resolveRunnerFlags({
+    normalizedArgv,
+    programOpts: program.opts() as Record<string, unknown>,
+    envForRun,
+    url: inputTarget.kind === "url" ? inputTarget.url : url,
+  });
 
   if (extractMode && lengthExplicitlySet && !json && isRichTty(stderr)) {
     stderr.write("Warning: --length is ignored with --extract (no summary is generated).\n");
   }
-
-  const metricsExplicitlySet = normalizedArgv.some(
-    (arg) => arg === "--metrics" || arg.startsWith("--metrics="),
-  );
-  const metricsMode = parseMetricsMode(
-    debug && !metricsExplicitlySet ? "detailed" : (program.opts().metrics as string),
-  );
-  const metricsEnabled = metricsMode !== "off";
-  const metricsDetailed = metricsMode === "detailed";
-  const shouldComputeReport = metricsEnabled;
-
-  const _firecrawlExplicitlySet = normalizedArgv.some(
-    (arg) => arg === "--firecrawl" || arg.startsWith("--firecrawl="),
-  );
-  const markdownModeExplicitlySet = normalizedArgv.some(
-    (arg) =>
-      arg === "--markdown-mode" ||
-      arg.startsWith("--markdown-mode=") ||
-      arg === "--markdown" ||
-      arg.startsWith("--markdown="),
-  );
   const modelArg =
     typeof program.opts().model === "string" ? (program.opts().model as string) : null;
   const cliProviderArg =
