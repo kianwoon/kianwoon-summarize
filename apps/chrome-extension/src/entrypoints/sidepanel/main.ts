@@ -50,6 +50,7 @@ import {
 import { createSlideImageLoader, normalizeSlideImageUrl } from "./slide-images";
 import { chooseSlideDescription, sanitizeSlideSummaryTitle } from "./slide-text-policy";
 import { createSlidesHydrator } from "./slides-hydrator";
+import { resolveSlidesPayload, slidesPayloadChanged } from "./slides-payload";
 import { hasResolvedSlidesPayload } from "./slides-pending";
 import { createStreamController } from "./stream-controller";
 import { buildSummaryEmptyState } from "./summary-empty-state";
@@ -1686,45 +1687,6 @@ function updateSlidesTextState() {
   queueSlidesRender();
 }
 
-function mergeSlidesPayload(
-  prev: NonNullable<PanelState["slides"]>,
-  next: NonNullable<PanelState["slides"]>,
-): NonNullable<PanelState["slides"]> {
-  if (prev.sourceId !== next.sourceId) return next;
-  const mergedByIndex = new Map<number, NonNullable<PanelState["slides"]>["slides"][number]>();
-  for (const slide of prev.slides) mergedByIndex.set(slide.index, slide);
-  for (const slide of next.slides) {
-    const existing = mergedByIndex.get(slide.index);
-    mergedByIndex.set(slide.index, existing ? { ...existing, ...slide } : slide);
-  }
-  const mergedSlides = Array.from(mergedByIndex.values()).sort((a, b) => a.index - b.index);
-  return {
-    ...prev,
-    ...next,
-    slides: mergedSlides,
-  };
-}
-
-function slidesPayloadChanged(
-  prev: NonNullable<PanelState["slides"]> | null,
-  next: NonNullable<PanelState["slides"]>,
-): boolean {
-  if (!prev) return true;
-  if (prev.sourceId !== next.sourceId) return true;
-  if (prev.slides.length !== next.slides.length) return true;
-  for (let i = 0; i < next.slides.length; i += 1) {
-    const current = next.slides[i];
-    const prior = prev.slides[i];
-    if (!prior || current.index !== prior.index) return true;
-    if (current.timestamp !== prior.timestamp) return true;
-    if (current.imageUrl !== prior.imageUrl) return true;
-    if ((current.ocrText ?? null) !== (prior.ocrText ?? null)) return true;
-    if ((current.ocrConfidence ?? null) !== (prior.ocrConfidence ?? null)) return true;
-  }
-  if (next.ocrAvailable !== prev.ocrAvailable) return true;
-  return false;
-}
-
 function updateSlideThumb(
   img: HTMLImageElement,
   thumb: HTMLElement,
@@ -1779,13 +1741,11 @@ function applySlidesPayload(data: SseSlidesData) {
     })),
   };
   const shouldReplaceSeeded = slidesSeededSourceId === data.sourceId;
-  const shouldReplaceForRun = Boolean(
-    activeSlidesRunId && slidesAppliedRunId !== activeSlidesRunId,
-  );
-  const merged =
-    !panelState.slides || shouldReplaceSeeded || shouldReplaceForRun
-      ? normalized
-      : mergeSlidesPayload(panelState.slides, normalized);
+  const merged = resolveSlidesPayload(panelState.slides, normalized, {
+    seededSourceId: slidesSeededSourceId,
+    activeSlidesRunId,
+    appliedSlidesRunId: slidesAppliedRunId,
+  });
   if (shouldReplaceSeeded) {
     slidesSeededSourceId = null;
   }
