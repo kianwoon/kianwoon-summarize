@@ -15,6 +15,7 @@ import {
 import { applyTheme } from "../../lib/theme";
 import { generateToken } from "../../lib/token";
 import { mountCheckbox } from "../../ui/zag-checkbox";
+import { bindSettingsStorage, bindSidepanelLifecycle, bindSidepanelUiEvents } from "./bindings";
 import { runChatAgentLoop } from "./chat-agent-loop";
 import { ChatController } from "./chat-controller";
 import { createChatHistoryRuntime } from "./chat-history-runtime";
@@ -2590,31 +2591,6 @@ function sendChatMessage() {
   startChatMessage(input);
 }
 
-refreshBtn.addEventListener("click", () => sendSummarize({ refresh: true }));
-clearBtn.addEventListener("click", () => {
-  void clearCurrentView();
-});
-drawerToggleBtn.addEventListener("click", () => toggleDrawer());
-advancedBtn.addEventListener("click", () => {
-  void send({ type: "panel:openOptions" });
-});
-advancedSettingsSummaryEl.addEventListener("click", (event) => {
-  event.preventDefault();
-  toggleAdvancedSettings();
-});
-
-chatSendBtn.addEventListener("click", sendChatMessage);
-chatInputEl.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && !e.shiftKey) {
-    e.preventDefault();
-    sendChatMessage();
-  }
-});
-chatInputEl.addEventListener("input", () => {
-  chatInputEl.style.height = "auto";
-  chatInputEl.style.height = `${Math.min(chatInputEl.scrollHeight, 120)}px`;
-});
-
 const bumpFontSize = (delta: number) => {
   void (async () => {
     const nextSize = typographyController.clampFontSize(
@@ -2627,9 +2603,6 @@ const bumpFontSize = (delta: number) => {
   })();
 };
 
-sizeSmBtn.addEventListener("click", () => bumpFontSize(-1));
-sizeLgBtn.addEventListener("click", () => bumpFontSize(1));
-
 const bumpLineHeight = (delta: number) => {
   void (async () => {
     const nextHeight = typographyController.clampLineHeight(
@@ -2641,50 +2614,53 @@ const bumpLineHeight = (delta: number) => {
   })();
 };
 
-lineTightBtn.addEventListener("click", () => bumpLineHeight(-LINE_HEIGHT_STEP));
-lineLooseBtn.addEventListener("click", () => bumpLineHeight(LINE_HEIGHT_STEP));
-
-modelPresetEl.addEventListener("change", () => {
+const persistCurrentModel = (opts?: { focusCustom?: boolean; blurCustom?: boolean }) => {
   updateModelRowUI();
-  if (!modelCustomEl.hidden) modelCustomEl.focus();
+  if (opts?.focusCustom && !modelCustomEl.hidden) modelCustomEl.focus();
+  if (opts?.blurCustom) modelCustomEl.blur();
   void (async () => {
     await patchSettings({ model: readCurrentModelValue() });
   })();
-});
+};
 
-modelCustomEl.addEventListener("change", () => {
-  void (async () => {
-    await patchSettings({ model: readCurrentModelValue() });
-  })();
-});
-
-modelCustomEl.addEventListener("keydown", (event) => {
-  if (event.key !== "Enter") return;
-  event.preventDefault();
-  modelCustomEl.blur();
-  void (async () => {
-    await patchSettings({ model: readCurrentModelValue() });
-  })();
-});
-
-slidesLayoutEl.addEventListener("change", () => {
-  const next = slidesLayoutEl.value === "gallery" ? "gallery" : "strip";
-  setSlidesLayout(next);
-  void (async () => {
-    await patchSettings({ slidesLayout: next });
-  })();
-});
-
-modelPresetEl.addEventListener("focus", refreshModelsIfStale);
-modelPresetEl.addEventListener("pointerdown", refreshModelsIfStale);
-modelCustomEl.addEventListener("focus", refreshModelsIfStale);
-modelCustomEl.addEventListener("pointerdown", refreshModelsIfStale);
-advancedSettingsEl.addEventListener("toggle", () => {
-  if (advancedSettingsAnimation) return;
-  if (advancedSettingsEl.open) refreshModelsIfStale();
-});
-modelRefreshBtn.addEventListener("click", () => {
-  void runRefreshFree();
+bindSidepanelUiEvents({
+  refreshBtn,
+  clearBtn,
+  drawerToggleBtn,
+  advancedBtn,
+  advancedSettingsSummaryEl,
+  chatSendBtn,
+  chatInputEl,
+  sizeSmBtn,
+  sizeLgBtn,
+  lineTightBtn,
+  lineLooseBtn,
+  modelPresetEl,
+  modelCustomEl,
+  slidesLayoutEl,
+  modelRefreshBtn,
+  advancedSettingsEl,
+  lineHeightStep: LINE_HEIGHT_STEP,
+  sendSummarize,
+  clearCurrentView,
+  toggleDrawer: () => toggleDrawer(),
+  openOptions: () => send({ type: "panel:openOptions" }),
+  toggleAdvancedSettings,
+  sendChatMessage,
+  bumpFontSize,
+  bumpLineHeight,
+  persistCurrentModel,
+  setSlidesLayout: (next) => {
+    setSlidesLayout(next);
+    void (async () => {
+      await patchSettings({ slidesLayout: next });
+    })();
+  },
+  refreshModelsIfStale: () => {
+    if (advancedSettingsAnimation && advancedSettingsEl.open) return;
+    refreshModelsIfStale();
+  },
+  runRefreshFree,
 });
 
 void (async () => {
@@ -2749,76 +2725,34 @@ setInterval(() => {
   void send({ type: "panel:ping" });
 }, 25_000);
 
-chrome.storage.onChanged.addListener((changes, areaName) => {
-  if (areaName !== "local") return;
-  const nextSettings = changes.settings?.newValue;
-  if (!nextSettings || typeof nextSettings !== "object") return;
-  if (!settingsHydrated) {
-    pendingSettingsSnapshot = {
-      ...(pendingSettingsSnapshot ?? {}),
-      ...(nextSettings as Partial<typeof defaultSettings>),
-    };
-  }
-  const nextChatEnabled = (nextSettings as { chatEnabled?: unknown }).chatEnabled;
-  if (typeof nextChatEnabled === "boolean" && nextChatEnabled !== chatEnabledValue) {
-    chatEnabledValue = nextChatEnabled;
-    applyChatEnabled();
-  }
-  const nextAutomationEnabled = (nextSettings as { automationEnabled?: unknown }).automationEnabled;
-  if (typeof nextAutomationEnabled === "boolean") {
-    automationEnabledValue = nextAutomationEnabled;
-    if (!automationEnabledValue) hideAutomationNotice();
-  }
+bindSettingsStorage({
+  applyChatEnabled,
+  hideAutomationNotice,
+  getSettingsHydrated: () => settingsHydrated,
+  setPendingSettingsSnapshot: (value) => {
+    pendingSettingsSnapshot = value;
+  },
+  getPendingSettingsSnapshot: () => pendingSettingsSnapshot,
+  setChatEnabledValue: (value) => {
+    chatEnabledValue = value;
+  },
+  setAutomationEnabledValue: (value) => {
+    automationEnabledValue = value;
+  },
 });
 
-let lastVisibility = document.visibilityState;
-let panelMarkedOpen = document.visibilityState === "visible";
-
-function markPanelOpen() {
-  if (panelMarkedOpen) return;
-  panelMarkedOpen = true;
-  errorController.clearInlineError();
-  void send({ type: "panel:ready" });
-  scheduleAutoKick();
-  void syncWithActiveTab();
-}
-
-function markPanelClosed() {
-  if (!panelMarkedOpen) return;
-  panelMarkedOpen = false;
-  window.clearTimeout(autoKickTimer);
-  void send({ type: "panel:closed" });
-}
-
-document.addEventListener("visibilitychange", () => {
-  const visible = document.visibilityState === "visible";
-  const wasVisible = lastVisibility === "visible";
-  if (visible && !wasVisible) {
-    markPanelOpen();
-  } else if (!visible && wasVisible) {
-    markPanelClosed();
-  }
-  lastVisibility = document.visibilityState;
-});
-
-window.addEventListener("focus", () => {
-  if (document.visibilityState !== "visible") return;
-  markPanelOpen();
-});
-
-window.addEventListener("keydown", (event) => {
-  if (event.key !== "Enter" || !event.shiftKey) return;
-  const target = event.target as HTMLElement | null;
-  if (
-    target &&
-    (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)
-  ) {
-    return;
-  }
-  event.preventDefault();
-  sendSummarize({ refresh: true });
-});
-
-window.addEventListener("beforeunload", () => {
-  void send({ type: "panel:closed" });
+bindSidepanelLifecycle({
+  sendReady: () => {
+    void send({ type: "panel:ready" });
+  },
+  sendClosed: () => {
+    window.clearTimeout(autoKickTimer);
+    void send({ type: "panel:closed" });
+  },
+  scheduleAutoKick,
+  syncWithActiveTab,
+  clearInlineError: () => {
+    errorController.clearInlineError();
+  },
+  sendSummarize,
 });
