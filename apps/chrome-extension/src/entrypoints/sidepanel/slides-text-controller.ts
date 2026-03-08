@@ -1,0 +1,117 @@
+import { parseTranscriptTimedText } from "../../../../../src/run/flows/url/slides-text.js";
+import type { SseSlidesData } from "../../../../../src/shared/sse-events.js";
+import {
+  buildSlideDescriptions,
+  deriveSlideSummaries,
+  resolveSlidesTextState,
+  type SlideTextMode,
+} from "./slides-state";
+
+type SlideSummarySource = "summary" | "slides" | null;
+
+export function createSlidesTextController(options: {
+  getSlides: () => SseSlidesData["slides"] | null | undefined;
+  getLengthValue: () => string;
+  getSlidesOcrEnabled: () => boolean;
+}) {
+  let slidesTextMode: SlideTextMode = "transcript";
+  let slidesTextToggleVisible = false;
+  let slidesTranscriptTimedText: string | null = null;
+  let slidesTranscriptAvailable = false;
+  let slidesOcrAvailable = false;
+  let slideDescriptions = new Map<number, string>();
+  let slideTitleByIndex = new Map<number, string>();
+  let slideSummarySource: SlideSummarySource = null;
+
+  const getSlides = () => options.getSlides() ?? [];
+
+  const rebuildDescriptions = () => {
+    slideDescriptions = new Map();
+    const slides = getSlides();
+    if (slides.length === 0) return;
+    slideDescriptions = buildSlideDescriptions({
+      slides,
+      transcriptTimedText: slidesTranscriptTimedText,
+      lengthValue: options.getLengthValue(),
+      slidesTextMode,
+      slidesOcrEnabled: options.getSlidesOcrEnabled(),
+      slidesOcrAvailable,
+      slidesTranscriptAvailable,
+    });
+  };
+
+  return {
+    reset() {
+      slidesTextMode = "transcript";
+      slidesTextToggleVisible = false;
+      slidesTranscriptTimedText = null;
+      slidesTranscriptAvailable = false;
+      slidesOcrAvailable = false;
+      slideDescriptions = new Map();
+      slideTitleByIndex = new Map();
+      slideSummarySource = null;
+    },
+    clearSummarySource() {
+      slideSummarySource = null;
+    },
+    rebuildDescriptions,
+    setTranscriptTimedText(value: string | null) {
+      slidesTranscriptTimedText = value ?? null;
+      slidesTranscriptAvailable = parseTranscriptTimedText(slidesTranscriptTimedText).length > 0;
+    },
+    syncTextState() {
+      const nextState = resolveSlidesTextState({
+        slides: getSlides(),
+        slidesOcrEnabled: options.getSlidesOcrEnabled(),
+        slidesTranscriptAvailable,
+        currentMode: slidesTextMode,
+      });
+      slidesOcrAvailable = nextState.slidesOcrAvailable;
+      slidesTextToggleVisible = nextState.slidesTextToggleVisible;
+      slidesTextMode = nextState.slidesTextMode;
+      rebuildDescriptions();
+    },
+    setTextMode(next: SlideTextMode) {
+      if (next === slidesTextMode) return false;
+      if (next === "ocr" && !slidesOcrAvailable) return false;
+      slidesTextMode = next;
+      rebuildDescriptions();
+      return true;
+    },
+    updateSummaryFromMarkdown(
+      markdown: string,
+      opts?: { preserveIfEmpty?: boolean; source?: Exclude<SlideSummarySource, null> },
+    ) {
+      const source = opts?.source ?? "summary";
+      if (source === "summary" && slideSummarySource === "slides") return false;
+      const derived = deriveSlideSummaries({
+        markdown,
+        slides: getSlides(),
+        transcriptTimedText: slidesTranscriptTimedText,
+        lengthValue: options.getLengthValue(),
+      });
+      if (!derived) {
+        if (opts?.preserveIfEmpty) return false;
+        slideTitleByIndex = new Map();
+        if (source === "slides") {
+          slideSummarySource = null;
+        } else if (!slideSummarySource) {
+          slideSummarySource = "summary";
+        }
+        return true;
+      }
+      slideTitleByIndex = derived.titles;
+      slideSummarySource = source;
+      return true;
+    },
+    getTextMode: () => slidesTextMode,
+    getTextToggleVisible: () => slidesTextToggleVisible,
+    getTranscriptTimedText: () => slidesTranscriptTimedText,
+    getTranscriptAvailable: () => slidesTranscriptAvailable,
+    getOcrAvailable: () => slidesOcrAvailable,
+    getDescriptions: () => slideDescriptions,
+    getDescriptionEntries: () => Array.from(slideDescriptions.entries()),
+    getTitles: () => slideTitleByIndex,
+    hasSummaryTitles: () => slideTitleByIndex.size > 0,
+  };
+}

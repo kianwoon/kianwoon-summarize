@@ -1,10 +1,7 @@
 import type { Message, ToolCall, ToolResultMessage } from "@mariozechner/pi-ai";
 import { extractYouTubeVideoId, shouldPreferUrlMode } from "@steipete/summarize-core/content/url";
 import MarkdownIt from "markdown-it";
-import {
-  parseTranscriptTimedText,
-  splitSummaryFromSlides,
-} from "../../../../../src/run/flows/url/slides-text.js";
+import { splitSummaryFromSlides } from "../../../../../src/run/flows/url/slides-text.js";
 import type { SseSlidesData } from "../../../../../src/shared/sse-events.js";
 import { listSkills } from "../../automation/skills-store";
 import { executeToolCall, getAutomationToolNames } from "../../automation/tools";
@@ -55,15 +52,13 @@ import { hasResolvedSlidesPayload } from "./slides-pending";
 import { createSlidesRenderer } from "./slides-renderer";
 import { shouldSeedPlannedSlidesForRun } from "./slides-seed-policy";
 import {
-  buildSlideDescriptions,
-  deriveSlideSummaries,
   formatSlideTimestamp,
-  normalizeSlideText,
   resolveSlidesLengthArg,
-  resolveSlidesTextState,
   selectMarkdownForLayout,
   splitSlidesMarkdown,
+  type SlideTextMode,
 } from "./slides-state";
+import { createSlidesTextController } from "./slides-text-controller";
 import { resolveSlidesRenderLayout } from "./slides-view-policy";
 import { createStreamController } from "./stream-controller";
 import { renderSummaryMarkdownDisplay } from "./summary-renderer";
@@ -297,21 +292,11 @@ let summarizeVideoLabel = "Video";
 let summarizePageWords: number | null = null;
 let summarizeVideoDurationSeconds: number | null = null;
 
-type SlideTextMode = "transcript" | "ocr";
 let slidesBusy = false;
 let slidesExpanded = true;
-let slidesTextMode: SlideTextMode = "transcript";
-let slidesTextToggleVisible = false;
-let slidesTranscriptTimedText: string | null = null;
-let slidesTranscriptAvailable = false;
-let slidesOcrAvailable = false;
 let slidesLayoutValue: SlidesLayout = defaultSettings.slidesLayout;
 let settingsHydrated = false;
 let pendingSettingsSnapshot: Partial<typeof defaultSettings> | null = null;
-let slideDescriptions = new Map<number, string>();
-let slideSummaryByIndex = new Map<number, string>();
-let slideTitleByIndex = new Map<number, string>();
-let slideSummarySource: "summary" | "slides" | null = null;
 let slidesContextRequestId = 0;
 let slidesContextPending = false;
 let slidesContextUrl: string | null = null;
@@ -327,6 +312,11 @@ let slidesSummaryModel: string | null = null;
 let pendingRunForPlannedSlides: RunStart | null = null;
 const pendingSummaryRunsByUrl = new Map<string, RunStart>();
 const pendingSlidesRunsByUrl = new Map<string, { runId: string; url: string }>();
+const slidesTextController = createSlidesTextController({
+  getSlides: () => panelState.slides?.slides ?? null,
+  getLengthValue: () => pickerSettings.length,
+  getSlidesOcrEnabled: () => slidesOcrEnabledValue,
+});
 
 const AGENT_NAV_TTL_MS = 20_000;
 type AgentNavigation = { url: string; tabId: number | null; at: number };
@@ -384,9 +374,7 @@ function stopSlidesStream() {
 }
 
 function setSlidesTranscriptTimedText(value: string | null) {
-  slidesTranscriptTimedText = value ?? null;
-  const segments = parseTranscriptTimedText(slidesTranscriptTimedText);
-  slidesTranscriptAvailable = segments.length > 0;
+  slidesTextController.setTranscriptTimedText(value);
 }
 
 function stopSlidesSummaryStream() {
@@ -398,7 +386,7 @@ function stopSlidesSummaryStream() {
   slidesSummaryHadError = false;
   slidesSummaryComplete = false;
   slidesSummaryModel = null;
-  slideSummarySource = null;
+  slidesTextController.clearSummarySource();
 }
 
 function resolveActiveSlidesRunId(): string | null {
@@ -662,11 +650,8 @@ async function handleSummarizeControlChange(value: { mode: "page" | "video"; sli
 }
 
 function handleSlidesTextModeChange(next: SlideTextMode) {
-  if (next === slidesTextMode) return;
   if (next === "ocr" && !slidesOcrEnabledValue) return;
-  if (next === "ocr" && !slidesOcrAvailable) return;
-  slidesTextMode = next;
-  rebuildSlideDescriptions();
+  if (!slidesTextController.setTextMode(next)) return;
   if (panelState.summaryMarkdown) {
     renderInlineSlides(renderMarkdownHostEl, { fallback: true });
   } else {
@@ -712,8 +697,8 @@ const summarizeControl = mountSummarizeControl(summarizeControlRoot, {
   mediaAvailable: false,
   videoLabel: "Video",
   busy: false,
-  slidesTextMode,
-  slidesTextToggleVisible,
+  slidesTextMode: slidesTextController.getTextMode(),
+  slidesTextToggleVisible: slidesTextController.getTextToggleVisible(),
   onSlidesTextModeChange: handleSlidesTextModeChange,
   onChange: handleSummarizeControlChange,
   onSummarize: () => sendSummarize(),
@@ -728,8 +713,8 @@ function refreshSummarizeControl() {
     videoLabel: summarizeVideoLabel,
     pageWords: summarizePageWords,
     videoDurationSeconds: summarizeVideoDurationSeconds,
-    slidesTextMode,
-    slidesTextToggleVisible,
+    slidesTextMode: slidesTextController.getTextMode(),
+    slidesTextToggleVisible: slidesTextController.getTextToggleVisible(),
     onSlidesTextModeChange: handleSlidesTextModeChange,
     onChange: handleSummarizeControlChange,
     onSummarize: () => sendSummarize(),
@@ -1059,13 +1044,7 @@ function resetSummaryView({
   slidesContextPending = false;
   slidesContextUrl = null;
   setSlidesTranscriptTimedText(null);
-  slidesOcrAvailable = false;
-  slidesTextToggleVisible = false;
-  slidesTextMode = "transcript";
-  slideDescriptions = new Map();
-  slideSummaryByIndex = new Map();
-  slideTitleByIndex = new Map();
-  slideSummarySource = null;
+  slidesTextController.reset();
   slidesSeededSourceId = null;
   slidesAppliedRunId = null;
   if (stopSlides) {
@@ -1108,7 +1087,7 @@ function buildPanelCachePayload(): PanelCachePayload | null {
     slidesSummaryModel: hasSlidesSummaryState ? slidesSummaryModel : null,
     lastMeta: panelState.lastMeta,
     slides: panelState.slides ?? null,
-    transcriptTimedText: slidesTranscriptTimedText ?? null,
+    transcriptTimedText: slidesTextController.getTranscriptTimedText() ?? null,
   };
 }
 
@@ -1156,7 +1135,7 @@ function applyPanelCache(payload: PanelCachePayload, opts?: { preserveChat?: boo
     slidesContextPending = false;
     slidesContextUrl = payload.url;
     updateSlidesTextState();
-    if (!slidesTranscriptAvailable) {
+    if (!slidesTextController.getTranscriptAvailable()) {
       void requestSlidesContext();
     }
     slidesAppliedRunId = resolveActiveSlidesRunId();
@@ -1256,7 +1235,7 @@ function renderMarkdownDisplay() {
 function renderMarkdown(markdown: string) {
   panelState.summaryMarkdown = markdown;
   updateSlideSummaryFromMarkdown(markdown, {
-    preserveIfEmpty: slideSummaryByIndex.size > 0,
+    preserveIfEmpty: slidesTextController.hasSummaryTitles(),
     source: "summary",
   });
   renderMarkdownDisplay();
@@ -1267,31 +1246,8 @@ function updateSlideSummaryFromMarkdown(
   markdown: string,
   opts?: { preserveIfEmpty?: boolean; source?: "summary" | "slides" },
 ) {
-  const source = opts?.source ?? "summary";
-  if (source === "summary" && slideSummarySource === "slides") return;
-  const derived = deriveSlideSummaries({
-    markdown,
-    slides: panelState.slides?.slides ?? [],
-    transcriptTimedText: slidesTranscriptTimedText,
-    lengthValue: pickerSettings.length,
-  });
-  if (!derived) {
-    if (opts?.preserveIfEmpty) return;
-    slideSummaryByIndex = new Map();
-    slideTitleByIndex = new Map();
-    if (source === "slides") {
-      slideSummarySource = null;
-    } else if (!slideSummarySource) {
-      slideSummarySource = "summary";
-    }
-    rebuildSlideDescriptions();
-    queueSlidesRender();
-    return;
-  }
-  slideSummaryByIndex = derived.summaries;
-  slideTitleByIndex = derived.titles;
-  slideSummarySource = source;
-  rebuildSlideDescriptions();
+  const changed = slidesTextController.updateSummaryFromMarkdown(markdown, opts);
+  if (!changed) return;
   queueSlidesRender();
 }
 
@@ -1311,30 +1267,11 @@ function seekToSlideTimestamp(seconds: number | null | undefined) {
   void send({ type: "panel:seek", seconds: Math.floor(seconds) });
 }
 function rebuildSlideDescriptions() {
-  slideDescriptions = new Map();
-  if (!panelState.slides) return;
-  slideDescriptions = buildSlideDescriptions({
-    slides: panelState.slides.slides,
-    transcriptTimedText: slidesTranscriptTimedText,
-    lengthValue: pickerSettings.length,
-    slidesTextMode,
-    slidesOcrEnabled: slidesOcrEnabledValue,
-    slidesOcrAvailable,
-    slidesTranscriptAvailable,
-  });
+  slidesTextController.rebuildDescriptions();
 }
 
 function updateSlidesTextState() {
-  const nextState = resolveSlidesTextState({
-    slides: panelState.slides?.slides ?? [],
-    slidesOcrEnabled: slidesOcrEnabledValue,
-    slidesTranscriptAvailable,
-    currentMode: slidesTextMode,
-  });
-  slidesOcrAvailable = nextState.slidesOcrAvailable;
-  slidesTextToggleVisible = nextState.slidesTextToggleVisible;
-  slidesTextMode = nextState.slidesTextMode;
-  rebuildSlideDescriptions();
+  slidesTextController.syncTextState();
   refreshSummarizeControl();
   queueSlidesRender();
 }
@@ -1385,8 +1322,8 @@ const slidesRenderer = createSlidesRenderer({
     preferredLayout: slidesLayoutValue,
     slidesExpanded,
     slides: panelState.slides,
-    descriptions: slideDescriptions,
-    titles: slideTitleByIndex,
+    descriptions: slidesTextController.getDescriptions(),
+    titles: slidesTextController.getTitles(),
   }),
   ensureDescriptions: rebuildSlideDescriptions,
   onSeek: seekToSlideTimestamp,
@@ -1478,7 +1415,7 @@ if (slidesTestHooks) {
   slidesTestHooks.applySlidesPayload = applySlidesPayload;
   slidesTestHooks.getRunId = () => panelState.runId;
   slidesTestHooks.getSummaryMarkdown = () => panelState.summaryMarkdown ?? "";
-  slidesTestHooks.getSlideDescriptions = () => Array.from(slideDescriptions.entries());
+  slidesTestHooks.getSlideDescriptions = () => slidesTextController.getDescriptionEntries();
   slidesTestHooks.getPhase = () => panelState.phase;
   slidesTestHooks.getModel = () => panelState.lastMeta.model ?? null;
   slidesTestHooks.getSlidesTimeline = () =>
@@ -1486,7 +1423,7 @@ if (slidesTestHooks) {
       index: slide.index,
       timestamp: Number.isFinite(slide.timestamp) ? slide.timestamp : null,
     })) ?? [];
-  slidesTestHooks.getTranscriptTimedText = () => slidesTranscriptTimedText;
+  slidesTestHooks.getTranscriptTimedText = () => slidesTextController.getTranscriptTimedText();
   slidesTestHooks.getSlidesSummaryMarkdown = () => slidesSummaryMarkdown;
   slidesTestHooks.getSlidesSummaryComplete = () => slidesSummaryComplete;
   slidesTestHooks.getSlidesSummaryModel = () => slidesSummaryModel;
@@ -1764,7 +1701,7 @@ function applySlidesSummaryMarkdown(markdown: string) {
     output = coerceSummaryWithSlides({
       markdown,
       slides: timeline,
-      transcriptTimedText: slidesTranscriptTimedText,
+      transcriptTimedText: slidesTextController.getTranscriptTimedText(),
       lengthArg,
     });
   }
@@ -1926,7 +1863,7 @@ const streamController = createStreamController({
     }
     if (phase === "idle") {
       maybeApplyPendingSlidesSummary();
-      if (panelState.slides && slideSummaryByIndex.size === 0) {
+      if (panelState.slides && !slidesTextController.hasSummaryTitles()) {
         rebuildSlideDescriptions();
         queueSlidesRender();
       }
