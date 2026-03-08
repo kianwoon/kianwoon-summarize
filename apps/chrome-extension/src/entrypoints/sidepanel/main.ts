@@ -1,5 +1,5 @@
 import type { Message, ToolCall, ToolResultMessage } from "@mariozechner/pi-ai";
-import { extractYouTubeVideoId, shouldPreferUrlMode } from "@steipete/summarize-core/content/url";
+import { extractYouTubeVideoId } from "@steipete/summarize-core/content/url";
 import MarkdownIt from "markdown-it";
 import { splitSummaryFromSlides } from "../../../../../src/run/flows/url/slides-text.js";
 import type { SseSlidesData } from "../../../../../src/shared/sse-events.js";
@@ -38,10 +38,8 @@ import { mountSummarizeControl } from "./pickers";
 import {
   normalizePanelUrl,
   panelUrlsMatch,
-  resolvePanelNavigationDecision,
   shouldAcceptRunForCurrentPage,
   shouldAcceptSlidesForCurrentPage,
-  shouldInvalidateCurrentSource,
 } from "./session-policy";
 import { createSetupRuntime, friendlyFetchError } from "./setup-runtime";
 import { normalizeSlideImageUrl } from "./slide-images";
@@ -63,6 +61,7 @@ import { registerSidepanelTestHooks } from "./test-hooks";
 import { parseTimestampHref } from "./timestamp-links";
 import type { ChatMessage, PanelPhase, PanelState, RunStart, UiState } from "./types";
 import { createTypographyController } from "./typography-controller";
+import { createUiStateRuntime } from "./ui-state-runtime";
 
 type PanelToBg =
   | { type: "panel:ready" }
@@ -1664,224 +1663,117 @@ const setupRuntime = createSetupRuntime({
   getStatusResetText: () => panelState.ui?.status ?? "",
 });
 const { maybeShowSetup } = setupRuntime;
+const uiStateRuntime = createUiStateRuntime({
+  panelState,
+  chatController,
+  appearanceControls,
+  typographyController,
+  navigationRuntime,
+  panelCacheController,
+  headerController,
+  clearInlineError: () => {
+    errorController.clearInlineError();
+  },
+  requestAgentAbort,
+  clearChatHistoryForActiveTab,
+  resetChatState,
+  migrateChatHistory,
+  maybeStartPendingSummaryRunForUrl,
+  maybeStartPendingSlidesForUrl,
+  applyPanelCache,
+  resetSummaryView,
+  appendNavigationMessage,
+  hideAutomationNotice,
+  hideSlideNotice,
+  maybeApplyPendingSlidesSummary,
+  applyChatEnabled,
+  restoreChatHistory,
+  rebuildSlideDescriptions,
+  renderInlineSlides,
+  setSlidesLayout: (value) => {
+    setSlidesLayout(value as SlidesLayout);
+  },
+  maybeSeedPlannedSlidesForPendingRun,
+  refreshSummarizeControl,
+  maybeShowSetup,
+  setPhase,
+  renderMarkdownDisplay,
+  readCurrentModelValue,
+  setModelValue,
+  updateModelRowUI,
+  isRefreshFreeRunning,
+  setModelRefreshDisabled: (value) => {
+    modelRefreshBtn.disabled = value;
+  },
+  renderMarkdownHostEl,
+  getActiveTabId: () => activeTabId,
+  setActiveTabId: (value) => {
+    activeTabId = value;
+  },
+  getActiveTabUrl: () => activeTabUrl,
+  setActiveTabUrl: (value) => {
+    activeTabUrl = value;
+  },
+  getCurrentRunTabId: () => currentRunTabId,
+  setCurrentRunTabId: (value) => {
+    currentRunTabId = value;
+  },
+  getLastPanelOpen: () => lastPanelOpen,
+  setLastPanelOpen: (value) => {
+    lastPanelOpen = value;
+  },
+  getAutoValue: () => autoValue,
+  setAutoValue: (value) => {
+    autoValue = value;
+  },
+  getChatEnabledValue: () => chatEnabledValue,
+  setChatEnabledValue: (value) => {
+    chatEnabledValue = value;
+  },
+  getAutomationEnabledValue: () => automationEnabledValue,
+  setAutomationEnabledValue: (value) => {
+    automationEnabledValue = value;
+  },
+  getSlidesEnabledValue: () => slidesEnabledValue,
+  setSlidesEnabledValue: (value) => {
+    slidesEnabledValue = value;
+  },
+  getSlidesParallelValue: () => slidesParallelValue,
+  setSlidesParallelValue: (value) => {
+    slidesParallelValue = value;
+  },
+  getSlidesOcrEnabledValue: () => slidesOcrEnabledValue,
+  setSlidesOcrEnabledValue: (value) => {
+    slidesOcrEnabledValue = value;
+  },
+  getInputMode: () => inputMode,
+  setInputMode: (value) => {
+    inputMode = value;
+  },
+  getInputModeOverride: () => inputModeOverride,
+  setInputModeOverride: (value) => {
+    inputModeOverride = value;
+  },
+  getMediaAvailable: () => mediaAvailable,
+  setMediaAvailable: (value) => {
+    mediaAvailable = value;
+  },
+  getSlidesLayoutValue: () => slidesLayoutValue,
+  setSummarizeVideoLabel: (value) => {
+    summarizeVideoLabel = value;
+  },
+  setSummarizePageWords: (value) => {
+    summarizePageWords = value;
+  },
+  setSummarizeVideoDurationSeconds: (value) => {
+    summarizeVideoDurationSeconds = value;
+  },
+  isStreaming,
+  onSlidesOcrChanged: updateSlidesTextState,
+});
 
 function updateControls(state: UiState) {
-  if (state.panelOpen && !lastPanelOpen) {
-    errorController.clearInlineError();
-  }
-  lastPanelOpen = state.panelOpen;
-  const nextTabId = state.tab.id ?? null;
-  const nextTabUrl = state.tab.url ?? null;
-  const preferUrlMode = nextTabUrl ? shouldPreferUrlMode(nextTabUrl) : false;
-  const hasActiveChat =
-    panelState.chatStreaming || chatQueue.length > 0 || chatController.getMessages().length > 0;
-  const hasMediaInfo = state.media != null;
-  const mediaFromState = Boolean(state.media && (state.media.hasVideo || state.media.hasAudio));
-  const preserveChatForTab =
-    (activeTabId === null && nextTabId !== null && hasActiveChat) ||
-    navigationRuntime.isRecentAgentNavigation(nextTabId, nextTabUrl);
-  const preserveChatForUrl =
-    (activeTabUrl === null && nextTabUrl !== null && hasActiveChat) ||
-    navigationRuntime.isRecentAgentNavigation(activeTabId, nextTabUrl);
-  const navigation = resolvePanelNavigationDecision({
-    activeTabId,
-    activeTabUrl,
-    nextTabId,
-    nextTabUrl,
-    hasActiveChat,
-    chatEnabled: chatEnabledValue,
-    preserveChat: nextTabId !== activeTabId ? preserveChatForTab : preserveChatForUrl,
-    preferUrlMode,
-    inputModeOverride,
-  });
-  const nextMediaAvailable = hasMediaInfo
-    ? mediaFromState || preferUrlMode
-    : navigation.kind !== "none"
-      ? preferUrlMode
-      : mediaAvailable || preferUrlMode;
-  const nextVideoLabel = state.media?.hasAudio && !state.media.hasVideo ? "Audio" : "Video";
-
-  if (navigation.kind === "tab") {
-    if (navigation.preserveChat) {
-      navigationRuntime.notePreserveChatForUrl(
-        nextTabUrl ?? navigationRuntime.getLastAgentNavigationUrl(),
-      );
-    }
-    const previousTabId = activeTabId;
-    activeTabId = nextTabId;
-    activeTabUrl = nextTabUrl;
-    if (panelState.chatStreaming && navigation.shouldAbortChatStream) {
-      requestAgentAbort("Tab changed");
-    }
-    if (navigation.shouldClearChat) {
-      void clearChatHistoryForActiveTab();
-      resetChatState();
-    } else if (navigation.shouldMigrateChat) {
-      void migrateChatHistory(previousTabId, nextTabId);
-    }
-    if (navigation.nextInputMode) {
-      inputMode = navigation.nextInputMode;
-    }
-    if (navigation.resetInputModeOverride) {
-      inputModeOverride = null;
-    }
-    if (nextTabId && nextTabUrl) {
-      if (!maybeStartPendingSummaryRunForUrl(nextTabUrl)) {
-        const cached = panelCacheController.resolve(nextTabId, nextTabUrl);
-        if (cached) {
-          applyPanelCache(cached, { preserveChat: navigation.preserveChat });
-        } else {
-          panelState.currentSource = null;
-          currentRunTabId = null;
-          resetSummaryView({ preserveChat: navigation.preserveChat });
-          panelCacheController.request(nextTabId, nextTabUrl, navigation.preserveChat);
-        }
-      }
-    } else {
-      panelState.currentSource = null;
-      currentRunTabId = null;
-      resetSummaryView({ preserveChat: navigation.preserveChat });
-    }
-  } else if (navigation.kind === "url") {
-    activeTabUrl = nextTabUrl;
-    if (navigation.preserveChat) {
-      navigationRuntime.notePreserveChatForUrl(nextTabUrl);
-    } else if (navigation.shouldClearChat) {
-      void clearChatHistoryForActiveTab();
-      resetChatState();
-    }
-    if (activeTabId && nextTabUrl) {
-      if (!maybeStartPendingSummaryRunForUrl(nextTabUrl)) {
-        const cached = panelCacheController.resolve(activeTabId, nextTabUrl);
-        if (cached) {
-          applyPanelCache(cached, { preserveChat: navigation.preserveChat });
-        } else {
-          panelState.currentSource = null;
-          currentRunTabId = null;
-          resetSummaryView({ preserveChat: navigation.preserveChat });
-          panelCacheController.request(activeTabId, nextTabUrl, navigation.preserveChat);
-        }
-      }
-    } else {
-      panelState.currentSource = null;
-      currentRunTabId = null;
-      resetSummaryView({ preserveChat: navigation.preserveChat });
-    }
-    if (navigation.nextInputMode) {
-      inputMode = navigation.nextInputMode;
-    }
-    if (navigation.shouldAppendNavigationMessage && nextTabUrl) {
-      void appendNavigationMessage(nextTabUrl, state.tab.title ?? null);
-    }
-  }
-
-  autoValue = state.settings.autoSummarize;
-  appearanceControls.setAutoValue(autoValue);
-  chatEnabledValue = state.settings.chatEnabled;
-  automationEnabledValue = state.settings.automationEnabled;
-  slidesEnabledValue = state.settings.slidesEnabled;
-  slidesParallelValue = state.settings.slidesParallel;
-  const nextSlidesOcrEnabled = Boolean(state.settings.slidesOcrEnabled);
-  if (nextSlidesOcrEnabled !== slidesOcrEnabledValue) {
-    slidesOcrEnabledValue = nextSlidesOcrEnabled;
-    updateSlidesTextState();
-  }
-  const fallbackModel = typeof state.settings.model === "string" ? state.settings.model.trim() : "";
-  if (fallbackModel && (!panelState.lastMeta.model || !panelState.lastMeta.model.trim())) {
-    panelState.lastMeta = {
-      ...panelState.lastMeta,
-      model: fallbackModel,
-      modelLabel: fallbackModel,
-    };
-  }
-  if (slidesEnabledValue && nextMediaAvailable) {
-    inputMode = "video";
-    inputModeOverride = "video";
-  }
-  if (state.settings.slidesLayout && state.settings.slidesLayout !== slidesLayoutValue) {
-    setSlidesLayout(state.settings.slidesLayout);
-  }
-  if (automationEnabledValue) hideAutomationNotice();
-  if (!slidesEnabledValue) hideSlideNotice();
-  if (slidesEnabledValue && (inputModeOverride ?? inputMode) === "video") {
-    maybeApplyPendingSlidesSummary();
-    maybeStartPendingSummaryRunForUrl(nextTabUrl ?? null);
-    maybeStartPendingSlidesForUrl(nextTabUrl ?? null);
-  }
-  applyChatEnabled();
-  if (chatEnabledValue && activeTabId && chatController.getMessages().length === 0) {
-    void restoreChatHistory();
-  }
-  if (appearanceControls.syncLengthFromState(state.settings.length)) {
-    rebuildSlideDescriptions();
-    if (panelState.summaryMarkdown) {
-      renderInlineSlides(renderMarkdownHostEl, { fallback: true });
-    }
-  }
-  if (
-    state.settings.fontSize !== typographyController.getCurrentFontSize() ||
-    state.settings.lineHeight !== typographyController.getCurrentLineHeight()
-  ) {
-    typographyController.apply(
-      appearanceControls.getFontFamily(),
-      state.settings.fontSize,
-      state.settings.lineHeight,
-    );
-    typographyController.setCurrentFontSize(state.settings.fontSize);
-    typographyController.setCurrentLineHeight(state.settings.lineHeight);
-  }
-  if (readCurrentModelValue() !== state.settings.model) {
-    setModelValue(state.settings.model);
-  }
-  updateModelRowUI();
-  modelRefreshBtn.disabled = !state.settings.tokenPresent || isRefreshFreeRunning();
-  if (panelState.currentSource) {
-    if (
-      shouldInvalidateCurrentSource({
-        stateTabUrl: state.tab.url,
-        currentSourceUrl: panelState.currentSource.url,
-      })
-    ) {
-      const preserveChat = navigationRuntime.isRecentAgentNavigation(activeTabId, state.tab.url);
-      if (preserveChat) {
-        navigationRuntime.notePreserveChatForUrl(state.tab.url);
-      }
-      panelState.currentSource = null;
-      currentRunTabId = null;
-      streamController.abort();
-      resetSummaryView({ preserveChat });
-    } else if (state.tab.title && state.tab.title !== panelState.currentSource.title) {
-      panelState.currentSource = { ...panelState.currentSource, title: state.tab.title };
-      headerController.setBaseTitle(state.tab.title);
-    }
-  }
-  if (!panelState.currentSource) {
-    panelState.lastMeta = { inputSummary: null, model: null, modelLabel: null };
-    headerController.setBaseTitle(state.tab.title || state.tab.url || "Summarize");
-    headerController.setBaseSubtitle("");
-  }
-  if (!isStreaming()) {
-    headerController.setStatus(state.status);
-  }
-  if (!nextMediaAvailable && hasMediaInfo) {
-    inputMode = "page";
-    inputModeOverride = null;
-  }
-  mediaAvailable = nextMediaAvailable;
-  summarizeVideoLabel = nextVideoLabel;
-  summarizePageWords = state.stats.pageWords;
-  summarizeVideoDurationSeconds = state.stats.videoDurationSeconds;
-  maybeSeedPlannedSlidesForPendingRun();
-  refreshSummarizeControl();
-  const showingSetup = maybeShowSetup(state);
-  if (showingSetup && panelState.phase !== "setup") {
-    setPhase("setup");
-  } else if (!showingSetup && panelState.phase === "setup") {
-    setPhase("idle");
-  }
-  if (!panelState.summaryMarkdown?.trim()) {
-    renderMarkdownDisplay();
-  }
+  uiStateRuntime.apply(state);
 }
 
 function handleBgMessage(msg: BgToPanel) {
