@@ -21,6 +21,15 @@ describe("sidepanel summary renderer", () => {
     expect(hostEl.innerHTML).toBe("");
   });
 
+  it("renders empty states without an optional detail line", () => {
+    const hostEl = document.createElement("div");
+    renderSummaryEmptyState({
+      hostEl,
+      state: { label: "Ready", message: "Click Summarize to start.", detail: "" },
+    });
+    expect(hostEl.querySelector(".renderEmpty__detail")).toBeNull();
+  });
+
   it("renders markdown links and timestamp anchors", () => {
     const hostEl = document.createElement("div");
     const renderInlineSlides = vi.fn();
@@ -102,5 +111,29 @@ describe("sidepanel summary renderer", () => {
       tabUrl: "https://example.com/watch",
     });
     expect(setStatus).toHaveBeenCalledWith(expect.stringContaining("broken markdown"));
+
+    renderSummaryMarkdownDisplay({
+      activeTabUrl: "https://example.com/watch",
+      autoSummarize: false,
+      currentSourceTitle: "Video",
+      currentSourceUrl: "https://example.com/watch",
+      hasSlides: false,
+      headerSetStatus: setStatus,
+      hostEl,
+      inputMode: "video",
+      markdown: "body",
+      md: {
+        render: () => {
+          throw "bad markdown";
+        },
+      },
+      phase: "done",
+      renderInlineSlides: vi.fn(),
+      slidesEnabled: false,
+      slidesLayout: "gallery",
+      tabTitle: "Video",
+      tabUrl: "https://example.com/watch",
+    });
+    expect(setStatus).toHaveBeenCalledWith("Error: bad markdown");
   });
 });

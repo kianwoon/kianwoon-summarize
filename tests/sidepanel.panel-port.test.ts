@@ -85,4 +85,19 @@ describe("sidepanel panel port runtime", () => {
     await runtime.send({ type: "panel:ready" });
     expect(connect).not.toHaveBeenCalled();
   });
+
+  it("ignores postMessage races while the port is reloading", async () => {
+    const port = createMockPort();
+    port.postMessage = vi.fn(() => {
+      throw new Error("disconnected");
+    });
+    const runtime = createPanelPortRuntime({
+      connect: () => port,
+      getCurrentWindowId: async () => 17,
+      onMessage: () => {},
+    });
+
+    await expect(runtime.send({ type: "panel:ready" })).resolves.toBeUndefined();
+    expect(port.postMessage).toHaveBeenCalledWith({ type: "panel:ready" });
+  });
 });

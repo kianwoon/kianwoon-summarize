@@ -43,4 +43,59 @@ describe("sidepanel/chat-state", () => {
 
     expect(buildChatRequestMessages(messages)).toEqual([{ role: "assistant", content: "hi" }]);
   });
+
+  it("counts array text parts, keeps tool results, and ignores unsupported roles", () => {
+    const messages: ChatMessage[] = [
+      {
+        id: "1",
+        role: "system",
+        content: "ignore me",
+        timestamp: 1,
+      } as ChatMessage,
+      {
+        id: "2",
+        role: "user",
+        content: [
+          { type: "text", text: "hello " },
+          { type: "image", image: "ignored" },
+          { type: "text", text: "world" },
+        ],
+        timestamp: 2,
+      } as ChatMessage,
+      {
+        id: "3",
+        role: "toolResult",
+        content: "",
+        timestamp: 3,
+      } as ChatMessage,
+    ];
+
+    const usage = computeChatContextUsage(messages, { maxMessages: 10, maxChars: 5 });
+    expect(usage.totalChars).toBe(11);
+    expect(usage.percent).toBe(100);
+    expect(hasUserChatMessage(messages)).toBe(true);
+    expect(buildChatRequestMessages(messages)).toEqual([
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "hello " },
+          { type: "image", image: "ignored" },
+          { type: "text", text: "world" },
+        ],
+      },
+      { role: "toolResult", content: "" },
+    ]);
+  });
+
+  it("drops empty user messages before compacting", () => {
+    const messages: ChatMessage[] = [
+      { id: "1", role: "user", content: "", timestamp: 1 },
+      { id: "2", role: "assistant", content: "ok", timestamp: 2 },
+      { id: "3", role: "user", content: "real", timestamp: 3 },
+    ];
+
+    expect(
+      compactChatHistory(messages, { maxMessages: 10, maxChars: 100 }).map((m) => m.id),
+    ).toEqual(["2", "3"]);
+  });
 });

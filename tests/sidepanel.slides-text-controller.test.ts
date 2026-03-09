@@ -68,4 +68,72 @@ describe("sidepanel slides text controller", () => {
     ).toBe(false);
     expect(controller.getTitles().get(1)).toBe("Kept title");
   });
+
+  it("clears summary titles on empty slide-sourced updates and respects text mode availability", () => {
+    const slides = [
+      {
+        index: 1,
+        timestamp: 2,
+        imageUrl: "x",
+        ocrText: "Readable OCR text for slide one with enough detail to count strongly.",
+      },
+      {
+        index: 2,
+        timestamp: 10,
+        imageUrl: "y",
+        ocrText: "Another readable OCR paragraph for slide two with enough detail to count.",
+      },
+      {
+        index: 3,
+        timestamp: 20,
+        imageUrl: "z",
+        ocrText: "Third readable OCR paragraph for slide three with enough detail to count.",
+      },
+    ];
+    const controller = createSlidesTextController({
+      getSlides: () => slides,
+      getLengthValue: () => "short",
+      getSlidesOcrEnabled: () => true,
+    });
+
+    controller.syncTextState();
+    expect(controller.getTextToggleVisible()).toBe(true);
+    expect(controller.setTextMode("ocr")).toBe(true);
+    expect(controller.getTextMode()).toBe("ocr");
+    expect(controller.setTextMode("ocr")).toBe(false);
+
+    controller.updateSummaryFromMarkdown(
+      ["### Slides", "Slide 1 · 0:02", "Canonical title", "Some text"].join("\n"),
+      { source: "slides" },
+    );
+    expect(controller.hasSummaryTitles()).toBe(true);
+
+    expect(
+      controller.updateSummaryFromMarkdown("", {
+        source: "slides",
+      }),
+    ).toBe(true);
+    expect(controller.hasSummaryTitles()).toBe(false);
+    controller.clearSummarySource();
+  });
+
+  it("resets transcript and ocr state cleanly", () => {
+    const controller = createSlidesTextController({
+      getSlides: () => [{ index: 1, timestamp: 2, imageUrl: "x", ocrText: "tiny" }],
+      getLengthValue: () => "short",
+      getSlidesOcrEnabled: () => false,
+    });
+
+    controller.setTranscriptTimedText("[00:02] Timed line");
+    controller.syncTextState();
+    expect(controller.getTranscriptAvailable()).toBe(true);
+    expect(controller.getTextToggleVisible()).toBe(false);
+
+    controller.reset();
+    expect(controller.getTranscriptTimedText()).toBeNull();
+    expect(controller.getTranscriptAvailable()).toBe(false);
+    expect(controller.getOcrAvailable()).toBe(false);
+    expect(controller.getDescriptionEntries()).toEqual([]);
+    expect(controller.getTitles().size).toBe(0);
+  });
 });

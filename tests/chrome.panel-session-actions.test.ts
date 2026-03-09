@@ -74,6 +74,23 @@ describe("chrome panel session actions", () => {
     expect(summarizeActiveTab).toHaveBeenCalledWith("auto-enabled");
   });
 
+  it("persists auto summarize without rerunning when disabled", async () => {
+    const patchSettings = vi.fn(async () => {});
+    const emitState = vi.fn();
+    const summarizeActiveTab = vi.fn();
+
+    await handlePanelSetAuto({
+      value: false,
+      patchSettings: patchSettings as never,
+      emitState,
+      summarizeActiveTab,
+    });
+
+    expect(patchSettings).toHaveBeenCalledWith({ autoSummarize: false });
+    expect(emitState).toHaveBeenCalledTimes(1);
+    expect(summarizeActiveTab).not.toHaveBeenCalled();
+  });
+
   it("skips rerun when the length setting is unchanged", async () => {
     const loadSettings = vi.fn(async () => ({ length: "medium" }));
     const patchSettings = vi.fn(async () => {});
@@ -91,5 +108,24 @@ describe("chrome panel session actions", () => {
     expect(patchSettings).not.toHaveBeenCalled();
     expect(emitState).not.toHaveBeenCalled();
     expect(summarizeActiveTab).not.toHaveBeenCalled();
+  });
+
+  it("persists changed length and reruns", async () => {
+    const loadSettings = vi.fn(async () => ({ length: "short" }));
+    const patchSettings = vi.fn(async () => {});
+    const emitState = vi.fn();
+    const summarizeActiveTab = vi.fn();
+
+    await handlePanelSetLength({
+      value: "long",
+      loadSettings: loadSettings as never,
+      patchSettings: patchSettings as never,
+      emitState,
+      summarizeActiveTab,
+    });
+
+    expect(patchSettings).toHaveBeenCalledWith({ length: "long" });
+    expect(emitState).toHaveBeenCalledTimes(1);
+    expect(summarizeActiveTab).toHaveBeenCalledWith("length-change");
   });
 });

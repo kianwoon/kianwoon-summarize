@@ -56,4 +56,48 @@ describe("slide output state", () => {
     });
     expect(state.isDone()).toBe(true);
   });
+
+  it("preserves existing timestamp and image path when updates are partial or invalid", () => {
+    const state = createSlideOutputState(null);
+    state.updateSlideEntry({ index: 5, timestamp: 12, imagePath: "/tmp/5.png" });
+    state.updateSlideEntry({ index: 5, timestamp: Number.NaN, imagePath: "" });
+
+    expect(state.getSlide(5)).toEqual({
+      index: 5,
+      timestamp: 12,
+      imagePath: "/tmp/5.png",
+    });
+  });
+
+  it("updates meta, filters invalid timestamps from order, and returns null once done", async () => {
+    const state = createSlideOutputState(null);
+    state.setMeta({ slidesDir: "/tmp/final", sourceUrl: "https://example.com/final" });
+    state.updateFromSlides({
+      sourceUrl: "https://example.com/watch?v=2",
+      sourceKind: "youtube",
+      sourceId: "2",
+      slidesDir: "/tmp/slides-2",
+      slidesDirId: null,
+      sceneThreshold: 0.3,
+      autoTuneThreshold: false,
+      autoTune: { enabled: false, chosenThreshold: 0, confidence: 0, strategy: "none" },
+      maxSlides: 10,
+      minSlideDuration: 5,
+      ocrRequested: false,
+      ocrAvailable: false,
+      slides: [
+        { index: 8, timestamp: Number.NaN, imagePath: "/tmp/8.png" },
+        { index: 7, timestamp: 7, imagePath: "/tmp/7.png" },
+      ],
+      warnings: [],
+    });
+
+    expect(state.getOrder()).toEqual([7]);
+    expect(state.getSlidesDir()).toBe("/tmp/slides-2");
+    expect(state.getSourceUrl()).toBe("https://example.com/watch?v=2");
+
+    state.markDone();
+    state.markDone();
+    await expect(state.waitForSlide(99)).resolves.toBeNull();
+  });
 });
